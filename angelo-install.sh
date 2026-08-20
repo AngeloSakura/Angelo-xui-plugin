@@ -42,7 +42,8 @@ echo " 仓库: $REPO"
 echo " 模式: $MODE"
 echo "===================================================="
 
-fresh)
+case "$MODE" in
+  fresh)
     echo "⬇️  拉取 install-fresh.sh"
     exec bash -c "curl -fsSL 'https://raw.githubusercontent.com/${REPO}/main/install-fresh.sh' | bash -s -- --tag '${VERSION}'"
     ;;
