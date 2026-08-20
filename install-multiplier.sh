@@ -138,11 +138,13 @@ fi
 # ---------- 解压 ----------
 echo "📦 解压..."
 tar -xzf "$TMP_DIR/$ASSET" -C "$TMP_DIR"
-NEW_BIN="$TMP_DIR/x-ui"
+# tarball 解压出的是 x-ui/ 目录；真正的二进制在 x-ui/x-ui
+NEW_BIN="$TMP_DIR/x-ui/x-ui"
 
 if [[ ! -x "$NEW_BIN" ]]; then
   echo "❌ 解压后找不到 x-ui 二进制"
   ls -la "$TMP_DIR"
+  ls -la "$TMP_DIR/x-ui" 2>/dev/null
   exit 1
 fi
 
