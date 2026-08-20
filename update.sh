@@ -252,6 +252,41 @@ fi
 log "🔄 替换二进制: $XUI_BIN"
 install -m 755 "$NEW_BIN" "$XUI_BIN"
 
+# ---------- 数据库 schema 兜底 ----------
+# Angelo fork 的 model.Inbound 比原版多 traffic_multiplier 列。
+# GORM AutoMigrate 在 InitDB 里本应补上，但若 DB 文件被锁、损坏、或新二进制
+# 初始化路径不同，进程可能起不来。装好 sqlite3 主动 ALTER TABLE 一次作为兜底。
+if ! command -v sqlite3 >/dev/null 2>&1; then
+  if command -v apk >/dev/null 2>&1; then
+    apk add --no-cache sqlite >/dev/null 2>&1
+  elif command -v apt-get >/dev/null 2>&1; then
+    apt-get install -y sqlite3 >/dev/null 2>&1
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y sqlite >/dev/null 2>&1
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y sqlite >/dev/null 2>&1
+  fi
+fi
+if command -v sqlite3 >/dev/null 2>&1; then
+  tbl=$(sqlite3 "$DB_PATH" "SELECT name FROM sqlite_master WHERE type='table' AND name='inbounds' LIMIT 1;" 2>/dev/null)
+  if [[ -n "$tbl" ]]; then
+    has=$(sqlite3 "$DB_PATH" "PRAGMA table_info(inbounds);" 2>/dev/null | awk -F'|' '$2=="traffic_multiplier"{print $2}')
+    if [[ -z "$has" ]]; then
+      if sqlite3 "$DB_PATH" "ALTER TABLE inbounds ADD COLUMN traffic_multiplier REAL NOT NULL DEFAULT 1.0;" 2>/dev/null; then
+        log "✅ DB 兜底: inbounds.traffic_multiplier 已补上 (default 1.0)"
+      else
+        warn "⚠️  ALTER TABLE inbounds 失败 — 留给 x-ui 启动时 AutoMigrate 处理"
+      fi
+    else
+      log "✅ inbounds.traffic_multiplier 已存在"
+    fi
+  else
+    warn "⚠️  DB 无 inbounds 表 — 跳过 schema 兜底（新建或非 Angelo fork）"
+  fi
+else
+  warn "⚠️  无 sqlite3 — 跳过 schema 兜底"
+fi
+
 # 替换 bin/ 资源（xray/dat/mtg），如果新 tarball 里也有
 if [[ -d "$EXTRACT_ROOT/bin" ]]; then
   log "� 更新 bin/ 下资源..."
