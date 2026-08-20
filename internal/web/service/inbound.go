@@ -1534,6 +1534,7 @@ func (s *InboundService) UpdateInbound(inbound *model.Inbound) (*model.Inbound, 
 		oldInbound.ExpiryTime = inbound.ExpiryTime
 		oldInbound.TrafficReset = inbound.TrafficReset
 		oldInbound.TrafficResetDay = inbound.TrafficResetDay
+		oldInbound.TrafficMultiplier = inbound.TrafficMultiplier
 		oldInbound.Listen = inbound.Listen
 		oldInbound.Port = inbound.Port
 		oldInbound.Protocol = inbound.Protocol
