@@ -81,16 +81,44 @@ esac
 echo "✅ 检测到架构: $ARCH_RAW → $ARCH"
 
 # ---------- 检测 x-ui 安装路径 ----------
+# Prefer the binary the running systemd unit actually execs; fall back to
+# which(1) and known install layouts. Detection logic mirrors 3x-ui's own
+# installer: it can land the binary under /usr/bin (Debian/Ubuntu via the
+# .deb), /usr/local/x-ui/bin, or /usr/local/x-ui/ (the older / Git install
+# layout — THIS file is where the systemd unit points even when a wrapper
+# also exists at /usr/bin/x-ui). Reading from the unit first is what keeps
+# the script from replacing the wrong file on hybrid installs.
 XUI_BIN=""
-for candidate in /usr/local/x-ui/bin/x-ui /usr/bin/x-ui /opt/x-ui/bin/x-ui; do
-  if [[ -x "$candidate" ]]; then
-    XUI_BIN="$candidate"
-    break
+if command -v systemctl >/dev/null 2>&1; then
+  svc_bin=$(systemctl cat x-ui 2>/dev/null \
+    | grep -m1 -oP 'ExecStart=\K\S+' \
+    | sed -E 's/[[:space:]]+run.*//; s/[[:space:]]+x-ui.*//')
+  if [[ -n "$svc_bin" && -x "$svc_bin" ]]; then
+    XUI_BIN="$svc_bin"
   fi
-done
+fi
+if [[ -z "$XUI_BIN" ]] && command -v x-ui >/dev/null; then
+  cand=$(command -v x-ui)
+  # which(1) may resolve a wrapper at /usr/bin/x-ui while the real binary
+  # lives at /usr/local/x-ui/x-ui — follow it if it's a symlink.
+  if [[ -L "$cand" ]]; then
+    target=$(readlink -f "$cand" 2>/dev/null || true)
+    [[ -n "$target" && -x "$target" ]] && cand="$target"
+  fi
+  XUI_BIN="$cand"
+fi
+if [[ -z "$XUI_BIN" ]]; then
+  for candidate in /usr/local/x-ui/x-ui /usr/local/x-ui/bin/x-ui /usr/bin/x-ui /opt/x-ui/bin/x-ui; do
+    if [[ -x "$candidate" ]]; then
+      XUI_BIN="$candidate"
+      break
+    fi
+  done
+fi
 
 if [[ -z "$XUI_BIN" ]]; then
   echo "❌ 找不到 x-ui 二进制。常见路径:"
+  echo "   /usr/local/x-ui/x-ui"
   echo "   /usr/local/x-ui/bin/x-ui"
   echo "   /usr/bin/x-ui"
   echo "   请先安装原版 3x-ui 后再运行此脚本"
@@ -98,7 +126,7 @@ if [[ -z "$XUI_BIN" ]]; then
 fi
 echo "✅ 找到 x-ui: $XUI_BIN"
 
-XUI_DIR=$(dirname "$(dirname "$XUI_BIN")")
+XUI_DIR=$(dirname "$XUI_BIN")
 echo "   安装目录: $XUI_DIR"
 
 # ---------- 备份 ----------
