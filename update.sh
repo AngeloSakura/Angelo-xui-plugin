@@ -137,10 +137,29 @@ svc_status() {
 logs_tail() {
   case "$INIT" in
     systemd) journalctl -u x-ui -n 50 --no-pager ;;
-    openrc)  cat /var/log/x-ui.log 2>/dev/null || /var/log/messages 2>/dev/null || echo "无日志" ;;
+    openrc)
+      # 优先级: x-ui.log → /usr/local/x-ui/x-ui.log → /var/log/messages
+      for f in /var/log/x-ui.log /usr/local/x-ui/x-ui.log /var/log/messages /var/log/syslog; do
+        if [[ -r "$f" ]]; then
+          echo "--- $f ---"
+          tail -n 30 "$f"
+          break
+        fi
+      done
+      ;;
     *)       "$XUI_BIN" log 2>/dev/null | tail -50 || echo "无日志" ;;
   esac
 }
+
+# ---------- 日志双写 ----------
+# /tmp 在小磁盘或配额 VPS 上可能写不进去（出现 tee: I/O error）。
+# 把所有输出同时写到 /var/log/x-ui-update.log 作为兜底，
+# 用户事后总能 cat 到这次升级的完整输出。
+LOG_FILE="${LOG_FILE:-/var/log/x-ui-update.log}"
+mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || LOG_FILE="$XUI_DIR/x-ui-update.log"
+if [[ -w "$LOG_FILE" ]] || (touch "$LOG_FILE" 2>/dev/null); then
+  exec > >(while IFS= read -r line; do printf '%s\n' "$line"; printf '%s\n' "$line" >>"$LOG_FILE"; done) 2>&1
+fi
 
 echo ""
 echo -e "${blue}====================================================${plain}"
@@ -277,6 +296,25 @@ fi
 rm -rf "$TMP_DIR" "$TMP_TGZ"
 
 if [[ "$RUNNING" == "active" ]]; then
+  # ---------- 端口自检：从数据库读 panel 端口，curl 试一次 ----------
+  WEB_PORT=""
+  if command -v sqlite3 >/dev/null 2>&1 && [[ -f "$DB_PATH" ]]; then
+    WEB_PORT=$(sqlite3 "$DB_PATH" "SELECT value FROM settings WHERE key='port' LIMIT 1;" 2>/dev/null)
+  fi
+  if [[ -n "$WEB_PORT" ]] && command -v curl >/dev/null 2>&1; then
+    PORT_OK=0
+    for _ in 1 2 3 4 5; do
+      code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:${WEB_PORT}/" 2>/dev/null)
+      if [[ "$code" =~ ^[12345][0-9][0-9]$ ]]; then
+        PORT_OK=1
+        log "✅ 面板端口 :${WEB_PORT} 响应 HTTP ${code}"
+        break
+      fi
+      sleep 1
+    done
+    [[ "$PORT_OK" -eq 0 ]] && warn "⚠️  面板端口 :${WEB_PORT} 5 次重试无响应 — 检查 x-ui 日志"
+  fi
+
   echo ""
   log "🎉 升级成功！"
   log "   新版本已运行"
