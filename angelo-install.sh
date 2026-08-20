@@ -58,14 +58,25 @@ echo " 模式:   $MODE"
 echo " x-ui 已安装: $([[ "$HAS_XUI" -eq 1 ]] && echo "yes" || echo "no")"
 echo -e "${blue}====================================================${plain}"
 
-SCRIPT_BASE="https://raw.githubusercontent.com/${REPO}/main"
+SCRIPT_BASE="https://cdn.jsdelivr.net/gh/${REPO}@main"
+# jsDelivr CDN bypasses raw.githubusercontent CDN cache;
+# falls back to raw if jsDelivr is unreachable.
+fetch_and_exec() {
+  local sub="$1"
+  local url_jsd="${SCRIPT_BASE}/${sub}"
+  local url_raw="https://raw.githubusercontent.com/${REPO}/main/${sub}"
+  if curl -fsSL --max-time 15 "$url_jsd" >"/tmp/${sub}"; then
+    echo "✅ 通过 jsDelivr 拉取 ${sub}"
+  elif curl -fsSL --max-time 15 "$url_raw" >"/tmp/${sub}"; then
+    echo "⚠️  jsDelivr 不可用，回退到 raw.githubusercontent"
+  else
+    echo "❌ 两个 CDN 都拉不到 ${sub}"
+    exit 1
+  fi
+  chmod +x "/tmp/${sub}"
+  bash "/tmp/${sub}" --tag "${VERSION}"
+}
 case "$MODE" in
-  fresh)
-    echo "⬇️  下载子脚本: install-fresh.sh"
-    exec bash -c "curl -fsSL '${SCRIPT_BASE}/install-fresh.sh' | bash -s -- --tag '${VERSION}'"
-    ;;
-  update)
-    echo "⬇️  下载子脚本: update.sh"
-    exec bash -c "curl -fsSL '${SCRIPT_BASE}/update.sh' | bash -s -- --tag '${VERSION}'"
-    ;;
+  fresh)  fetch_and_exec install-fresh.sh ;;
+  update) fetch_and_exec update.sh ;;
 esac
