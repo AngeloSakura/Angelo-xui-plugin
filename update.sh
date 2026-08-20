@@ -296,23 +296,32 @@ fi
 rm -rf "$TMP_DIR" "$TMP_TGZ"
 
 if [[ "$RUNNING" == "active" ]]; then
-  # ---------- 端口自检：从数据库读 panel 端口，curl 试一次 ----------
-  WEB_PORT=""
-  if command -v sqlite3 >/dev/null 2>&1 && [[ -f "$DB_PATH" ]]; then
-    WEB_PORT=$(sqlite3 "$DB_PATH" "SELECT value FROM settings WHERE key='port' LIMIT 1;" 2>/dev/null)
-  fi
-  if [[ -n "$WEB_PORT" ]] && command -v curl >/dev/null 2>&1; then
-    PORT_OK=0
-    for _ in 1 2 3 4 5; do
-      code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:${WEB_PORT}/" 2>/dev/null)
-      if [[ "$code" =~ ^[12345][0-9][0-9]$ ]]; then
-        PORT_OK=1
-        log "✅ 面板端口 :${WEB_PORT} 响应 HTTP ${code}"
-        break
-      fi
-      sleep 1
-    done
-    [[ "$PORT_OK" -eq 0 ]] && warn "⚠️  面板端口 :${WEB_PORT} 5 次重试无响应 — 检查 x-ui 日志"
+  # ---------- 等待 x-ui 写 "Web server running HTTP on" 到日志 ----------
+  # x-ui 启动到监听实际端口需要 1-3s（DB 加载 + TLS 初始化）；
+  # openrc 的 status: started 只代表 start-stop-daemon 跑了 fork 出来，
+  # 不代表面板真的在 listen。所以不靠 curl，靠 x-ui 自己写的日志行。
+  LISTEN=""
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+    sleep 1
+    case "$INIT" in
+      systemd)
+        LISTEN=$(journalctl -u x-ui --no-pager -n 50 2>/dev/null | grep -E 'Web server running HTTP on' | tail -1) ;;
+      openrc)
+        for f in /var/log/messages /var/log/syslog /usr/local/x-ui/x-ui.log /var/log/x-ui.log; do
+          [ -r "$f" ] || continue
+          LISTEN=$(tail -n 50 "$f" 2>/dev/null | grep -E 'Web server running HTTP on' | tail -1)
+          [ -n "$LISTEN" ] && break
+        done ;;
+      *)
+        LISTEN=$("$XUI_BIN" log 2>/dev/null | grep -E 'Web server running HTTP on' | tail -1) ;;
+    esac
+    [[ -n "$LISTEN" ]] && break
+  done
+
+  if [[ -n "$LISTEN" ]]; then
+    log "✅ $LISTEN"
+  else
+    warn "⚠️  15 秒内未在日志中看到 Web server running — 进程启动但面板未就绪"
   fi
 
   echo ""
