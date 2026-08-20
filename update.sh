@@ -15,8 +15,6 @@ set -euo pipefail
 REPO="AngeloSakura/Angelo-xui-plugin"
 TAG=""
 ARCH=""
-RELEASE_JSON=""
-NEED_RESTART_SVC=1
 
 # 颜色
 red='\033[0;31m'
@@ -176,64 +174,22 @@ if [[ -d "$XUI_DIR/bin" ]]; then
 fi
 
 # ---------- 选产物 ----------
-# 优先级：
-#   1. 探测 release 资产清单，挑 alpine 专用 (musl) 还是 linux (glibc)
-#   2. alpine 上若有 xray 兼容运行问题，优先用 alpine-musl 版
-#   3. api.github.com 在国内常常超时 → 失败时直接拼固定 URL 下载
-log "🔍 选产物 (musl=$IS_MUSL)..."
+# 资产 URL 固定: https://github.com/${REPO}/releases/download/<TAG>/x-ui-linux-${ARCH}.tar.gz
+TAG_FROM_REPO="${TAG}"
+ASSET_NAME="x-ui-linux-${ARCH}.tar.gz"
+ASSET_URL="https://github.com/${REPO}/releases/download/${TAG_FROM_REPO}/${ASSET_NAME}"
 
-# 候选 CDN：仅 GitHub 直链 + jsDelivr（保留作为 release 资产 CDN 不可达时的兜底）
-download_asset() {
-  local sub_path="$1"
-  local out="$2"
-  # 1) GitHub Release 直链
-  if curl -fsSL --max-time 30 --retry 1 -o "$out" \
-       "https://github.com/${REPO}/releases/download/${TAG}/${sub_path}"; then
-    return 0
-  fi
-  # 2) jsDelivr 兜底（raw/release 资产均可缓存）
-  if curl -fsSL --max-time 30 --retry 1 -o "$out" \
-       "https://cdn.jsdelivr.net/gh/${REPO}@${TAG}/${sub_path}"; then
-    return 0
-  fi
-  return 1
-}
-
-# 候选资产名，按优先级排
-CANDIDATES=()
-if [[ "$IS_MUSL" -eq 1 ]]; then
-  CANDIDATES+=("x-ui-alpine-${ARCH}.tar.gz")
-  CANDIDATES+=("x-ui-musl-${ARCH}.tar.gz")
-fi
-CANDIDATES+=("x-ui-linux-${ARCH}.tar.gz")
-CANDIDATES+=("x-ui-${ARCH}.tar.gz")
-
-ASSET=""
+log "⬇️  下载: $ASSET_URL"
 TMP_TGZ=$(mktemp --suffix=.tar.gz)
-for c in "${CANDIDATES[@]}"; do
-  if download_asset "$c" "$TMP_TGZ"; then
-    ASSET="$c"
-    log "   命中产物: $c"
-    break
-  fi
-done
-
-if [[ -z "$ASSET" ]]; then
-  err "未找到适配 $ARCH 的产物 (musl=$IS_MUSL)"
-  err "候选: ${CANDIDATES[*]}"
-  err "请到 https://github.com/${REPO}/releases/tag/${TAG} 确认资产"
-  err "原始 curl 输出 (debug):"
-  for c in "${CANDIDATES[@]}"; do
-    echo "--- $c ---"
-    curl -sS --max-time 10 -I \
-      "https://github.com/${REPO}/releases/download/${TAG}/${c}" 2>&1 | head -3 || true
-  done
+if ! curl -fsSL --max-time 120 --retry 3 -o "$TMP_TGZ" "$ASSET_URL"; then
+  err "下载失败: $ASSET_URL"
+  err "请检查 tag/release 是否存在，或联系作者"
+  rm -f "$TMP_TGZ"
   exit 1
 fi
-
-log "⬇️  下载完成: $ASSET"
 FILE_SIZE=$(stat -c%s "$TMP_TGZ" 2>/dev/null || wc -c <"$TMP_TGZ")
-log "   大小: $FILE_SIZE bytes"
+log "   下载完成: $FILE_SIZE bytes"
+[[ "$FILE_SIZE" -lt 1000000 ]] && { err "产物太小 (<1MB)，下载可能失败"; exit 1; }
 
 # ---------- 替换 ----------
 log "⏸️  停止服务..."
