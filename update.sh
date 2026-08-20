@@ -180,7 +180,7 @@ ASSET_NAME="x-ui-linux-${ARCH}.tar.gz"
 ASSET_URL="https://github.com/${REPO}/releases/download/${TAG_FROM_REPO}/${ASSET_NAME}"
 
 log "⬇️  下载: $ASSET_URL"
-TMP_TGZ=$(mktemp --suffix=.tar.gz)
+TMP_TGZ=$(mktemp -t x-ui-XXXXXX.tar.gz)
 if ! curl -fsSL --max-time 120 --retry 3 -o "$TMP_TGZ" "$ASSET_URL"; then
   err "下载失败: $ASSET_URL"
   err "请检查 tag/release 是否存在，或联系作者"
