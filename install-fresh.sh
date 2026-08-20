@@ -93,41 +93,64 @@ if [[ -x "$INSTALL_DIR/bin/x-ui" ]] || [[ -x "$INSTALL_DIR/x-ui" ]]; then
 fi
 
 # ---------- 查询 release 资产，挑适配包 ----------
-log "🔍 查询 release 资产..."
-if ! RELEASE_JSON=$(curl -fsSL --retry 3 \
-    "https://api.github.com/repos/${REPO}/releases/tags/${TAG}"); then
-  err "无法获取 release 信息: ${TAG}"
-  err "请到 https://github.com/${REPO}/releases/tag/${TAG} 确认"
-  exit 1
-fi
+log "🔍 选产物 (musl=$IS_MUSL)..."
 
-# 按优先级排：Alpine musl 优先 → 普通 linux-amd64 → 任何 amd64 tar.gz
-ASSET_URLS=()
+# 候选资产名（按优先级排）
+CANDIDATES=()
 if [[ "$PKG_MGR" == "apk" ]]; then
-  ASSET_URLS+=("$(echo "$RELEASE_JSON" | grep -oE '"browser_download_url":\s*"[^"]+alpine[^"]+amd64[^"]+\.tar\.gz"' | head -1 | sed -E 's/.*"([^"]+)".*/\1/')")
-  ASSET_URLS+=("$(echo "$RELEASE_JSON" | grep -oE '"browser_download_url":\s*"[^"]+musl[^"]+amd64[^"]+\.tar\.gz"' | head -1 | sed -E 's/.*"([^"]+)".*/\1/')")
+  CANDIDATES+=("x-ui-alpine-${ARCH}.tar.gz")
+  CANDIDATES+=("x-ui-musl-${ARCH}.tar.gz")
 fi
-ASSET_URLS+=("$(echo "$RELEASE_JSON" | grep -oE "\"browser_download_url\":\\s*\"[^\"]+linux-${ARCH}[^\"]*\\.tar\\.gz\"" | head -1 | sed -E 's/.*"([^"]+)".*/\1/')")
-ASSET_URLS+=("$(echo "$RELEASE_JSON" | grep -oE "\"browser_download_url\":\\s*\"[^\"]+${ARCH}[^\"]*\\.tar\\.gz\"" | head -1 | sed -E 's/.*"([^"]+)".*/\1/')")
+CANDIDATES+=("x-ui-linux-${ARCH}.tar.gz")
 
-DOWNLOAD_URL=""
-for url in "${ASSET_URLS[@]}"; do
-  [[ -n "$url" ]] && DOWNLOAD_URL="$url" && break
-done
-if [[ -z "$DOWNLOAD_URL" ]]; then
-  err "未找到适配 $ARCH 的产物"
-  err "请到 https://github.com/${REPO}/releases/tag/${TAG} 确认资产"
-  exit 1
+# 尝试从 GitHub API 拿资产清单（仅在能访问时用）
+RELEASE_JSON=""
+if curl -fsSL --max-time 15 --retry 1 \
+    "https://api.github.com/repos/${REPO}/releases/tags/${TAG}" \
+    > /tmp/release.$$.json 2>/dev/null; then
+  RELEASE_JSON=$(cat /tmp/release.$$.json)
+  rm -f /tmp/release.$$.json
+  log "   (通过 GitHub API 拿资产清单)"
+else
+  log "   (api.github.com 不可用，改用固定命名下载)"
 fi
 
 # ---------- 下载 ----------
 TMP_DIR=$(mktemp -d); trap 'rm -rf "$TMP_DIR"' EXIT
 TMP_FILE="$TMP_DIR/x-ui.tar.gz"
-log "⬇️  下载: $DOWNLOAD_URL"
-if ! curl -fsSL --retry 3 --retry-delay 5 -o "$TMP_FILE" "$DOWNLOAD_URL"; then
-  err "下载失败"
+DOWNLOADED_FROM=""
+
+for c in "${CANDIDATES[@]}"; do
+  # 先走 jsDelivr（绕过 raw CDN 缓存，CDN 国内稳定）
+  if curl -fsSL --max-time 30 --retry 1 -o "$TMP_FILE" \
+       "https://cdn.jsdelivr.net/gh/${REPO}@${TAG}/${c}"; then
+    DOWNLOADED_FROM="jsDelivr ($c)"
+    break
+  fi
+  # 再走 jsDelivr 的 release 路径
+  if [[ -n "$RELEASE_JSON" ]]; then
+    url=$(echo "$RELEASE_JSON" \
+      | grep -oE "\"browser_download_url\":\\s*\"[^\"]+/${c}\"" \
+      | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+    if [[ -n "$url" ]] && curl -fsSL --max-time 30 --retry 1 \
+        -o "$TMP_FILE" "$url"; then
+      DOWNLOADED_FROM="GitHub API ($c)"; break
+    fi
+  fi
+  # 最后兜底：GitHub Release 直链（绕过 API，CDN 可能慢）
+  if curl -fsSL --max-time 60 --retry 2 -o "$TMP_FILE" \
+       "https://github.com/${REPO}/releases/download/${TAG}/${c}"; then
+    DOWNLOADED_FROM="GitHub release ($c)"; break
+  fi
+done
+
+if [[ -z "$DOWNLOADED_FROM" ]]; then
+  err "未找到适配 $ARCH 的产物"
+  err "候选: ${CANDIDATES[*]}"
+  err "请到 https://github.com/${REPO}/releases/tag/${TAG} 确认资产"
   exit 1
 fi
+log "✅ 下载来源: $DOWNLOADED_FROM"
 FILE_SIZE=$(stat -c%s "$TMP_FILE" 2>/dev/null || stat -f%z "$TMP_FILE")
 log "   下载完成: $FILE_SIZE bytes"
 [[ "$FILE_SIZE" -lt 1000000 ]] && { err "产物太小 (<1MB)，下载可能失败"; exit 1; }
