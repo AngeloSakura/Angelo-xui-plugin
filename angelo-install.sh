@@ -17,9 +17,12 @@ MODE=""   # fresh | update | auto
 # 颜色
 red='\033[0;31m'; green='\033[0;32m'; yellow='\033[1;33m'; blue='\033[0;34m'; plain='\033[0m'
 
-# ---------- 参数 ----------
-shift_count=0
-if [[ -n "$VERSION" ]]; then shift_count=1; fi
+# ---------- 参数解析 ----------
+# 第一个位置参数是版本（可省，省时下面退出）
+# 其余是开关
+VERSION="${1:-}"
+if [[ -n "$VERSION" ]]; then shift; fi
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --fresh)  MODE="fresh"; shift ;;
