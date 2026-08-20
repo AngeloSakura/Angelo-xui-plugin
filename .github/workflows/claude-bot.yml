@@ -1605,7 +1605,7 @@ jobs:
       # worse.
       - name: Collect the three lane reviews
         continue-on-error: true
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           pattern: claude-review-body-*-${{ github.event.pull_request.number }}-${{ github.run_attempt }}
           path: /tmp/reviews
