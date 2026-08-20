@@ -230,43 +230,14 @@ FILE_SIZE=$(stat -c%s "$TMP_TGZ" 2>/dev/null || wc -c <"$TMP_TGZ")
 log "   下载完成: $FILE_SIZE bytes"
 [[ "$FILE_SIZE" -lt 1000000 ]] && { err "产物太小 (<1MB)，下载可能失败"; exit 1; }
 
-# ---------- 数据库 schema 兜底 (BEFORE stop_svc) ----------
-# Angelo fork 的 model.Inbound 比原版多 traffic_multiplier 列。
-# GORM AutoMigrate 在 InitDB 里本应补上，但若 DB 文件被锁、损坏、或新二进制
-# 初始化路径不同，进程可能起不来。装好 sqlite3 主动 ALTER TABLE 一次作为兜底。
-#
-# 这步放在 stop_svc 之前：万一后续 install/start 在 musl+bash 子进程 pipe 上
-# 翻车 (上一版的 SIGPIPE 场景)，DB schema 已经先补好，下次跑 update 或者直接
-# x-ui 启动都能恢复。
-if ! command -v sqlite3 >/dev/null 2>&1; then
-  if command -v apk >/dev/null 2>&1; then
-    apk add --no-cache sqlite >/dev/null 2>&1 || warn "⚠️  apk add sqlite 失败 — DB 兜底跳过"
-  elif command -v apt-get >/dev/null 2>&1; then
-    apt-get install -y sqlite3 >/dev/null 2>&1 || warn "⚠️  apt-get install sqlite3 失败"
-  elif command -v dnf >/dev/null 2>&1; then
-    dnf install -y sqlite >/dev/null 2>&1 || warn "⚠️  dnf install sqlite 失败"
-  elif command -v yum >/dev/null 2>&1; then
-    yum install -y sqlite >/dev/null 2>&1 || warn "⚠️  yum install sqlite 失败"
-  fi
-fi
-if command -v sqlite3 >/dev/null 2>&1; then
-  tbl=$(sqlite3 "$DB_PATH" "SELECT name FROM sqlite_master WHERE type='table' AND name='inbounds' LIMIT 1;" 2>/dev/null)
-  if [[ -n "$tbl" ]]; then
-    has=$(sqlite3 "$DB_PATH" "PRAGMA table_info(inbounds);" 2>/dev/null | awk -F'|' '$2=="traffic_multiplier"{print $2}')
-    if [[ -z "$has" ]]; then
-      if sqlite3 "$DB_PATH" "ALTER TABLE inbounds ADD COLUMN traffic_multiplier REAL NOT NULL DEFAULT 1.0;" 2>/dev/null; then
-        log "✅ DB 兜底: inbounds.traffic_multiplier 已补上 (default 1.0)"
-      else
-        warn "⚠️  ALTER TABLE inbounds 失败 — 留给 x-ui 启动时 AutoMigrate 处理"
-      fi
-    else
-      log "✅ inbounds.traffic_multiplier 已存在"
-    fi
-  else
-    warn "⚠️  DB 无 inbounds 表 — 跳过 schema 兜底（新建或非 Angelo fork）"
-  fi
+# Schema 兜底：装 sqlite3、给 inbounds 加 traffic_multiplier 列（缺则补，default 1.0）。
+command -v sqlite3 >/dev/null 2>&1 || { command -v apk >/dev/null 2>&1 && apk add --no-cache sqlite; command -v apt-get >/dev/null 2>&1 && apt-get install -y sqlite3; command -v dnf >/dev/null 2>&1 && dnf install -y sqlite; command -v yum >/dev/null 2>&1 && yum install -y sqlite; } >/dev/null 2>&1
+if command -v sqlite3 >/dev/null 2>&1 && sqlite3 "$DB_PATH" "PRAGMA table_info(inbounds);" 2>/dev/null | grep -q traffic_multiplier; then
+  log "✅ inbounds.traffic_multiplier 已存在"
+elif command -v sqlite3 >/dev/null 2>&1; then
+  sqlite3 "$DB_PATH" "ALTER TABLE inbounds ADD COLUMN traffic_multiplier REAL NOT NULL DEFAULT 1.0;" 2>/dev/null && log "✅ inbounds.traffic_multiplier 已补上" || warn "⚠️  ALTER TABLE 失败 — 留给 x-ui 启动 AutoMigrate"
 else
-  warn "⚠️  无 sqlite3 — 跳过 schema 兜底"
+  warn "⚠️  无 sqlite3 — 留给 x-ui 启动 AutoMigrate"
 fi
 
 # ---------- 替换 ----------
