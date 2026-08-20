@@ -151,14 +151,15 @@ logs_tail() {
   esac
 }
 
-# ---------- 日志双写 ----------
-# /tmp 在小磁盘或配额 VPS 上可能写不进去（出现 tee: I/O error）。
-# 把所有输出同时写到 /var/log/x-ui-update.log 作为兜底，
-# 用户事后总能 cat 到这次升级的完整输出。
+# ---------- 日志双写 (best-effort) ----------
+# 同时把输出写一份到 /var/log/x-ui-update.log，方便事后查 trace。
+# 用后台 `tee` 而不是 `exec > >(while read)`：后者在 Alpine/musl 下偶发
+# SIGPIPE 提早退出 (`set -e` 会把脚本干掉，只剩 stop 那行进度日志)。
+# 失败也无所谓 — 终端输出永远不丢。
 LOG_FILE="${LOG_FILE:-/var/log/x-ui-update.log}"
-mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || LOG_FILE="$XUI_DIR/x-ui-update.log"
-if [[ -w "$LOG_FILE" ]] || (touch "$LOG_FILE" 2>/dev/null); then
-  exec > >(while IFS= read -r line; do printf '%s\n' "$line"; printf '%s\n' "$line" >>"$LOG_FILE"; done) 2>&1
+if mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null && touch "$LOG_FILE" 2>/dev/null; then
+  trap '' PIPE
+  exec > >(tee -a "$LOG_FILE") 2>&1
 fi
 
 echo ""
