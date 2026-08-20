@@ -714,7 +714,7 @@ export default function InboundFormModal({
           t('pages.inbounds.form.trafficMultiplierHelp'),
         )}
         rules={{
-          validate: rhfZodValidate(InboundFormSchema.shape.trafficMultiplier),
+          validate: rhfZodValidate(InboundDbFieldsSchema.shape.trafficMultiplier),
         }}
       >
         <InputNumber min={0.1} max={100} step={0.1} />
