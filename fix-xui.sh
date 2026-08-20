@@ -30,16 +30,29 @@ echo "===== [2/6] 数据库 schema 兜底 ====="
 # GORM AutoMigrate 在 x-ui 启动时本应补上，但若进程起不来、
 # DB 路径不对、或二进制与 DB schema 版本不一致，老库就缺这一列，
 # 下次启动会 panic (sql: missing destination name traffic_multiplier)。
-# 用 sqlite3 主动 ALTER TABLE 兜底，无 sqlite3 就先装。
+# 用 sqlite3 主动 ALTER TABLE 兜底，无 sqlite3 就先装；装不到也不中断主流程。
+INSTALLED_BY=""
 if ! command -v sqlite3 >/dev/null 2>&1; then
+  INSTALL_OUT=""
   if command -v apk >/dev/null 2>&1; then
-    apk add --no-cache sqlite >/dev/null 2>&1 && ok "已装 sqlite3 (apk)"
+    INSTALL_OUT=$(apk add --no-cache sqlite 2>&1) && INSTALLED_BY="apk"
   elif command -v apt-get >/dev/null 2>&1; then
-    apt-get install -y sqlite3 >/dev/null 2>&1 && ok "已装 sqlite3 (apt-get)"
+    INSTALL_OUT=$(apt-get install -y sqlite3 2>&1) && INSTALLED_BY="apt-get"
   elif command -v dnf >/dev/null 2>&1; then
-    dnf install -y sqlite >/dev/null 2>&1 && ok "已装 sqlite3 (dnf)"
+    INSTALL_OUT=$(dnf install -y sqlite 2>&1) && INSTALLED_BY="dnf"
   elif command -v yum >/dev/null 2>&1; then
-    yum install -y sqlite >/dev/null 2>&1 && ok "已装 sqlite3 (yum)"
+    INSTALL_OUT=$(yum install -y sqlite 2>&1) && INSTALLED_BY="yum"
+  fi
+  if [ -n "$INSTALLED_BY" ] && command -v sqlite3 >/dev/null 2>&1; then
+    ok "已装 sqlite3 ($INSTALLED_BY)"
+  else
+    warn "自动装 sqlite3 失败 — 跳过 schema 兜底，依靠 x-ui 启动时 GORM AutoMigrate"
+    [ -n "$INSTALL_OUT" ] && echo "$INSTALL_OUT" | sed 's/^/    | /'
+    echo "    你也可以手动装："
+    echo "      Alpine:   apk add --no-cache sqlite"
+    echo "      Debian:   apt-get install -y sqlite3"
+    echo "      RHEL/Fedora: dnf install -y sqlite   (或 yum install -y sqlite)"
+    echo "    或者直接用 busybox 自带的 sqlite (少数精简镜像):  busybox --list 2>/dev/null | grep -i sql"
   fi
 fi
 
