@@ -159,18 +159,30 @@ log "✅ 数据库: $DB_PATH (不会被修改)"
 
 # ---------- 备份 ----------
 BACKUP_DIR="/var/backups/x-ui-multiplier"
-mkdir -p "$BACKUP_DIR"
+mkdir -p "$BACKUP_DIR" 2>/dev/null || BACKUP_DIR="$XUI_DIR/.bak"
 STAMP=$(date +%Y%m%d-%H%M%S)
 BACKUP_FILE="$BACKUP_DIR/x-ui.bak.$STAMP"
-cp -f "$XUI_BIN" "$BACKUP_FILE"
-chmod +x "$BACKUP_FILE"
-log "✅ 已备份原二进制到: $BACKUP_FILE"
+if cp -f "$XUI_BIN" "$BACKUP_FILE" 2>/dev/null && chmod +x "$BACKUP_FILE"; then
+  log "✅ 已备份原二进制到: $BACKUP_FILE"
+else
+  warn "⚠️  备份失败($BACKUP_FILE) — 继续升级（旧二进制未保留）"
+  BACKUP_FILE=""
+fi
 
 # 备份 bin/ 下资源（xray/dat/mtg），如果存在
 BIN_BACKUP_DIR="$BACKUP_DIR/bin.$STAMP"
 if [[ -d "$XUI_DIR/bin" ]]; then
-  cp -a "$XUI_DIR/bin" "$BIN_BACKUP_DIR"
-  log "✅ 已备份 bin/ 到: $BIN_BACKUP_DIR"
+  if cp -a "$XUI_DIR/bin" "$BIN_BACKUP_DIR" 2>/dev/null; then
+    log "✅ 已备份 bin/ 到: $BIN_BACKUP_DIR"
+  else
+    warn "⚠️  bin/ 备份失败 — 继续升级"
+  fi
+fi
+
+# 自动修剪旧备份：x-ui.bak.* 保留最近 3 份；bin.* 保留最近 2 份
+if [[ -d "$BACKUP_DIR" ]]; then
+  ls -t "$BACKUP_DIR"/x-ui.bak.* 2>/dev/null | tail -n +4 | xargs -r rm -f
+  ls -dt "$BACKUP_DIR"/bin.* 2>/dev/null | tail -n +3 | xargs -r rm -rf
 fi
 
 # ---------- 选产物 ----------
