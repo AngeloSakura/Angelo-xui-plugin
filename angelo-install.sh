@@ -59,22 +59,21 @@ echo " x-ui 已安装: $([[ "$HAS_XUI" -eq 1 ]] && echo "yes" || echo "no")"
 echo -e "${blue}====================================================${plain}"
 
 SCRIPT_BASE="https://cdn.jsdelivr.net/gh/${REPO}@main"
-# jsDelivr CDN bypasses raw.githubusercontent CDN cache;
-# falls back to raw if jsDelivr is unreachable.
+RAW_BASE="https://raw.githubusercontent.com/${REPO}/main"
 fetch_and_exec() {
   local sub="$1"
-  local url_jsd="${SCRIPT_BASE}/${sub}"
-  local url_raw="https://raw.githubusercontent.com/${REPO}/main/${sub}"
-  if curl -fsSL --max-time 15 "$url_jsd" >"/tmp/${sub}"; then
+  local out="/tmp/angelo-${sub}"
+  # 1) jsDelivr 优先（CDN 国内快，但偶发 500）
+  if curl -fsSL --max-time 20 --retry 2 "$SCRIPT_BASE/${sub}" -o "$out"; then
     echo "✅ 通过 jsDelivr 拉取 ${sub}"
-  elif curl -fsSL --max-time 15 "$url_raw" >"/tmp/${sub}"; then
-    echo "⚠️  jsDelivr 不可用，回退到 raw.githubusercontent"
+  elif curl -fsSL --max-time 20 --retry 2 "$RAW_BASE/${sub}" -o "$out"; then
+    echo "✅ jsDelivr 失败，回退到 raw 拉取 ${sub}"
   else
-    echo "❌ 两个 CDN 都拉不到 ${sub}"
+    echo "❌ jsDelivr 和 raw 都不通"
     exit 1
   fi
-  chmod +x "/tmp/${sub}"
-  bash "/tmp/${sub}" --tag "${VERSION}"
+  chmod +x "$out"
+  bash "$out" --tag "${VERSION}"
 }
 case "$MODE" in
   fresh)  fetch_and_exec install-fresh.sh ;;
