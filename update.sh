@@ -255,6 +255,25 @@ while [[ $TRIES -gt 0 ]]; do
   TRIES=$((TRIES - 1))
 done
 
+# ---------- 修补 openrc init 脚本（Angelo fork 需要 `run` 子命令）----------
+if [[ "$INIT" == "openrc" && -f /etc/init.d/x-ui ]]; then
+  if ! grep -q '^command_args="run"' /etc/init.d/x-ui; then
+    warn "⚠️  /etc/init.d/x-ui 缺少 command_args=\"run\" — Angelo fork 需要它"
+    if cp -a /etc/init.d/x-ui "/etc/init.d/x-ui.bak.$(date +%s)" 2>/dev/null \
+       && sed -i 's|^command="\(.*x-ui\)"$|command="\1"\ncommand_args="run"\ndirectory="/usr/local/x-ui"|' /etc/init.d/x-ui \
+       && rc-service x-ui restart 2>/dev/null; then
+      sleep 2
+      if svc_status | grep -q active; then
+        log "✅ init 脚本修补完成，服务已重启"
+      else
+        warn "⚠️  init 修补后服务仍异常，请查 rc-service x-ui status"
+      fi
+    else
+      warn "⚠️  init 修补失败 — 请手工编辑 /etc/init.d/x-ui 加 command_args=\"run\""
+    fi
+  fi
+fi
+
 rm -rf "$TMP_DIR" "$TMP_TGZ"
 
 if [[ "$RUNNING" == "active" ]]; then
