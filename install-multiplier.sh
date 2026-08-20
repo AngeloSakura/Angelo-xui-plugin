@@ -190,9 +190,34 @@ sleep 5
 VER_INSTALLED=$("$XUI_BIN" version 2>/dev/null | head -1 || echo "unknown")
 echo "✅ 已安装版本: $VER_INSTALLED"
 
-# ---------- 数据库迁移验证 ----------
+# ---------- 数据库迁移：检测 sqlite3，装；不行则走 x-ui migrate-db 兜底 ----------
 echo ""
-echo "🔍 检查数据库迁移..."
+echo "🔍 检查/准备数据库迁移工具..."
+
+ensure_sqlite3() {
+  if command -v sqlite3 >/dev/null 2>&1; then
+    echo "✅ sqlite3 已安装: $(sqlite3 -version | head -1)"
+    return 0
+  fi
+  echo "ℹ️  未检测到 sqlite3，尝试自动安装..."
+  if command -v apt-get >/dev/null 2>&1; then
+    DEBIAN_FRONTEND=noninteractive apt-get update -qq && \
+      DEBIAN_FRONTEND=noninteractive apt-get install -y -qq sqlite3 && return 0
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y sqlite && return 0
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y sqlite && return 0
+  elif command -v apk >/dev/null 2>&1; then
+    apk add --no-cache sqlite && return 0
+  elif command -v pacman >/dev/null 2>&1; then
+    pacman -Sy --noconfirm sqlite && return 0
+  fi
+  echo "⚠️  未能自动安装 sqlite3（包管理器未识别）"
+  return 1
+}
+
+ensure_sqlite3 || echo "   → 后续将跳过 sqlite3 验证，改用 x-ui migrate-db 兜底"
+
 DB_PATH=""
 for candidate in /etc/x-ui/x-ui.db /usr/local/x-ui/db/x-ui.db /var/lib/x-ui/x-ui.db; do
   if [[ -f "$candidate" ]]; then
@@ -202,18 +227,37 @@ for candidate in /etc/x-ui/x-ui.db /usr/local/x-ui/db/x-ui.db /var/lib/x-ui/x-ui
 done
 
 if [[ -z "$DB_PATH" ]]; then
-  echo "⚠️  找不到数据库文件，请手动检查"
-elif command -v sqlite3 >/dev/null; then
-  if sqlite3 "$DB_PATH" "PRAGMA table_info(inbounds);" 2>/dev/null | grep -q "traffic_multiplier"; then
-    echo "✅ 数据库已自动添加 traffic_multiplier 列"
-  else
-    echo "⚠️  数据库列未找到。可能是:"
-    echo "   - 服务还没启动 (等 30 秒再查)"
-    echo "   - 数据库路径不同 (在主节点上 db 可能在 /etc/x-ui/)"
-    echo "   - 进面板 → Inbounds → 编辑入站，如果看到 Traffic multiplier 字段就说明成功了"
-  fi
+  echo "⚠️  找不到数据库文件，跳过迁移验证（面板正常访问 = 启动成功）"
 else
-  echo "⚠️  系统没装 sqlite3，无法自动验证。请手动检查面板"
+  HAS_COL=false
+  if command -v sqlite3 >/dev/null 2>&1; then
+    if sqlite3 "$DB_PATH" "PRAGMA table_info(inbounds);" 2>/dev/null | grep -q "traffic_multiplier"; then
+      HAS_COL=true
+    fi
+  fi
+
+  if [[ "$HAS_COL" == true ]]; then
+    echo "✅ 数据库已包含 traffic_multiplier 列"
+  else
+    echo "ℹ️  数据库缺 traffic_multiplier 列，调用 x-ui migrate-db 补齐..."
+    if command -v x-ui >/dev/null 2>&1; then
+      if x-ui migrate-db 2>&1 | tee -a "$LOG_FILE"; then
+        echo "✅ migrate-db 完成"
+      else
+        echo "⚠️  x-ui migrate-db 返回非零，继续启动（启动时 GORM AutoMigrate 会兜底）"
+      fi
+    else
+      echo "⚠️  没 x-ui 命令且没 sqlite3，跳过显式迁移。Go 进程首次启动会跑 GORM AutoMigrate 兜底"
+    fi
+    sleep 2
+    if command -v sqlite3 >/dev/null 2>&1; then
+      if sqlite3 "$DB_PATH" "PRAGMA table_info(inbounds);" 2>/dev/null | grep -q "traffic_multiplier"; then
+        echo "✅ 迁移后数据库已包含 traffic_multiplier 列"
+      else
+        echo "⚠️  仍检测不到该列 — 进面板 Inbounds 编辑入站确认是否出现 'Traffic multiplier' 字段"
+      fi
+    fi
+  fi
 fi
 
 echo ""
@@ -228,6 +272,8 @@ echo " 下一步:"
 echo "   1. 登录面板 → Inbounds → 编辑入站 → Basic 标签"
 echo "   2. 找到 'Traffic multiplier' 字段，输入倍率 (例如 5)"
 echo "   3. 保存即可生效"
+echo ""
+echo " 如已存在旧数据入站: 把倍率从默认 1 改成你想要的倍率即可，无需重启"
 echo ""
 echo " 如需回滚:"
 echo "   sudo cp $BACKUP_PATH $XUI_BIN"
