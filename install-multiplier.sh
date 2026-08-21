@@ -6,14 +6,15 @@
 #   curl -sSL https://raw.githubusercontent.com/AngeloSakura/Angelo-xui-plugin/main/install-multiplier.sh | sudo bash -s -- --tag v0.1 --repo AngeloSakura/Angelo-xui-plugin
 #
 # 功能:
-#   1. 自动检测架构 (amd64 / arm64)
-#   2. 从 GitHub Release 下载对应 tarball
-#   3. 备份现有 /usr/local/x-ui/bin/x-ui
-#   4. 停止 x-ui 服务
-#   5. 替换二进制
-#   6. 启动 x-ui 服务
-#   7. 验证数据库 traffic_multiplier 列已自动添加
-#   8. 出错自动回滚
+#   1. 自动检测架构 (amd64 / arm64 / armv7)
+#   2. 自动检测操作系统 (debian / alpine / rhel / ...) + 包管理器
+#   3. 自动检测 init 系统 (systemd / OpenRC / runit / sysvinit)
+#   4. 按 init 系统探测 x-ui 真实路径（不靠 which）
+#   5. 从 GitHub Release 下载对应 tarball
+#   6. 备份并替换二进制；镜像到所有候选位置
+#   7. 用对应 init 命令启停（systemctl / rc-service / sv / service）
+#   8. 验证数据库 traffic_multiplier 列已自动添加
+#   9. 出错自动回滚
 set -euo pipefail
 
 REPO="AngeloSakura/Angelo-xui-plugin"
@@ -57,6 +58,83 @@ if [[ $EUID -ne 0 ]]; then
   exit 1
 fi
 
+# ---------- 操作系统 + 包管理器 + init 系统 探测 ----------
+OS_ID="unknown"
+PKG_MGR="unknown"
+for f in /etc/os-release /etc/lsb-release /etc/alpine-release /etc/redhat-release /etc/debian_version; do
+  if [[ -f "$f" ]]; then
+    case "$f" in
+      /etc/os-release)   OS_ID=$(. "$f" 2>/dev/null && echo "${ID:-unknown}") ;;
+      /etc/alpine-release) OS_ID="alpine" ;;
+      /etc/redhat-release) OS_ID="rhel" ;;
+      /etc/debian_version)  OS_ID="debian" ;;
+    esac
+    break
+  fi
+done
+command -v apk    >/dev/null && PKG_MGR="apk"
+command -v apt-get >/dev/null && PKG_MGR="apt"
+command -v dnf    >/dev/null && PKG_MGR="dnf"
+command -v yum    >/dev/null && PKG_MGR="yum"
+command -v pacman >/dev/null && PKG_MGR="pacman"
+echo "✅ 操作系统: $OS_ID  包管理器: $PKG_MGR"
+
+INIT_SYS="none"
+if     command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then INIT_SYS="systemd"
+elif   [[ -f /sbin/openrc-run ]] || command -v openrc-run >/dev/null 2>&1;       then INIT_SYS="openrc"
+elif   [[ -d /etc/sv ]] && command -v sv >/dev/null 2>&1;                         then INIT_SYS="runit"
+elif   command -v service >/dev/null 2>&1 && [[ -f /etc/init.d/x-ui ]];          then INIT_SYS="sysvinit"
+fi
+echo "✅ Init 系统: $INIT_SYS"
+
+service_start() {
+  case "$INIT_SYS" in
+    systemd)   systemctl start x-ui ;;
+    openrc)    rc-service x-ui start ;;
+    runit)     sv start x-ui 2>/dev/null || sv up x-ui ;;
+    sysvinit)  service x-ui start ;;
+    none)      return 1 ;;
+  esac
+}
+service_stop() {
+  case "$INIT_SYS" in
+    systemd)   systemctl stop x-ui ;;
+    openrc)    rc-service x-ui stop ;;
+    runit)     sv stop x-ui 2>/dev/null || sv down x-ui ;;
+    sysvinit)  service x-ui stop ;;
+    none)      return 1 ;;
+  esac
+}
+service_status() {
+  case "$INIT_SYS" in
+    systemd)   systemctl is-active x-ui 2>/dev/null ;;
+    openrc)    rc-service x-ui status 2>&1 | grep -q started && echo active || echo inactive ;;
+    runit)     sv status x-ui 2>/dev/null | head -1 ;;
+    sysvinit)  service x-ui status 2>&1 | head -1 ;;
+    none)      return 1 ;;
+  esac
+}
+unit_binary() {
+  # Read the binary the running service actually execs.
+  case "$INIT_SYS" in
+    systemd)
+      systemctl cat x-ui 2>/dev/null \
+        | grep -m1 -oP 'ExecStart=\K\S+' \
+        | sed -E 's/[[:space:]]+run.*//; s/[[:space:]]+x-ui.*//'
+      ;;
+    openrc)
+      [[ -f /etc/init.d/x-ui ]] && grep -m1 -E '^command=' /etc/init.d/x-ui | sed -E 's/^command="?([^"[:space:]]+).*/\1/'
+      ;;
+    runit)
+      [[ -f /etc/sv/x-ui/run ]] && grep -m1 -oE '/[^ ]*x-ui' /etc/sv/x-ui/run
+      ;;
+    sysvinit)
+      [[ -f /etc/init.d/x-ui ]] && grep -m1 -E '^(DAEMON|BINARY|PROGRAM)=' /etc/init.d/x-ui \
+        | sed -E 's/.*="?([^"[:space:]]+x-ui[^"[:space:]]*).*/\1/' | head -1
+      ;;
+  esac
+}
+
 if ! command -v curl >/dev/null; then
   echo "❌ 缺少 curl。请先 apt install curl / yum install curl"
   exit 1
@@ -81,26 +159,15 @@ esac
 echo "✅ 检测到架构: $ARCH_RAW → $ARCH"
 
 # ---------- 检测 x-ui 安装路径 ----------
-# Prefer the binary the running systemd unit actually execs; fall back to
-# which(1) and known install layouts. Detection logic mirrors 3x-ui's own
-# installer: it can land the binary under /usr/bin (Debian/Ubuntu via the
-# .deb), /usr/local/x-ui/bin, or /usr/local/x-ui/ (the older / Git install
-# layout — THIS file is where the systemd unit points even when a wrapper
-# also exists at /usr/bin/x-ui). Reading from the unit first is what keeps
-# the script from replacing the wrong file on hybrid installs.
+# Init system first → it tells us where the live binary really lives.
+# /usr/bin/x-ui on Debian/Ubuntu is sometimes a wrapper, sometimes the real
+# thing — never trust which(1) when a unit / OpenRC script disagrees.
 XUI_BIN=""
-if command -v systemctl >/dev/null 2>&1; then
-  svc_bin=$(systemctl cat x-ui 2>/dev/null \
-    | grep -m1 -oP 'ExecStart=\K\S+' \
-    | sed -E 's/[[:space:]]+run.*//; s/[[:space:]]+x-ui.*//')
-  if [[ -n "$svc_bin" && -x "$svc_bin" ]]; then
-    XUI_BIN="$svc_bin"
-  fi
+if svc_bin=$(unit_binary) && [[ -n "$svc_bin" && -x "$svc_bin" ]]; then
+  XUI_BIN="$svc_bin"
 fi
 if [[ -z "$XUI_BIN" ]] && command -v x-ui >/dev/null; then
   cand=$(command -v x-ui)
-  # which(1) may resolve a wrapper at /usr/bin/x-ui while the real binary
-  # lives at /usr/local/x-ui/x-ui — follow it if it's a symlink.
   if [[ -L "$cand" ]]; then
     target=$(readlink -f "$cand" 2>/dev/null || true)
     [[ -n "$target" && -x "$target" ]] && cand="$target"
@@ -128,6 +195,21 @@ echo "✅ 找到 x-ui: $XUI_BIN"
 
 XUI_DIR=$(dirname "$XUI_BIN")
 echo "   安装目录: $XUI_DIR"
+
+# Mirror targets: every place a binary called "x-ui" might answer `x-ui`,
+# `which`, the unit, or the OpenRC script. Replacing only XUI_BIN left
+# hybrid installs (wrapper + real) half-upgraded — patch all of them.
+MIRROR_TARGETS=("$XUI_BIN")
+for cand in /usr/local/x-ui/x-ui /usr/local/x-ui/bin/x-ui /usr/bin/x-ui /opt/x-ui/bin/x-ui; do
+  [[ -e "$cand" || -L "$cand" ]] && MIRROR_TARGETS+=("$cand")
+done
+# Dedup while preserving order.
+declare -A _seen=()
+MIRROR_DEDUP=()
+for t in "${MIRROR_TARGETS[@]}"; do
+  [[ -z "${_seen[$t]:-}" ]] && { MIRROR_DEDUP+=("$t"); _seen["$t"]=1; }
+done
+MIRROR_TARGETS=("${MIRROR_DEDUP[@]}")
 
 # ---------- 备份 ----------
 mkdir -p "$BACKUP_DIR"
@@ -178,39 +260,49 @@ fi
 
 # ---------- 停止服务 ----------
 SERVICE_WAS_ACTIVE=false
-if systemctl is-active --quiet x-ui 2>/dev/null; then
+if [[ "$INIT_SYS" != "none" ]] && service_status 2>/dev/null | grep -qiE 'active|run|up|started'; then
   SERVICE_WAS_ACTIVE=true
-  echo "⏸️  停止 x-ui 服务..."
-  systemctl stop x-ui || true
-elif command -v x-ui >/dev/null; then
-  echo "⏸️  通过 x-ui stop 停止..."
-  x-ui stop 2>/dev/null || true
+fi
+
+if [[ "$INIT_SYS" != "none" ]]; then
+  echo "⏸️  通过 $INIT_SYS 停止 x-ui..."
+  service_stop || true
 else
-  echo "⚠️  未检测到 systemd x-ui，尝试直接 kill 旧进程..."
+  echo "⚠️  未检测到 init 系统，尝试直接 kill 旧进程..."
   pkill -f "$(basename "$XUI_BIN")" 2>/dev/null || true
   sleep 1
 fi
 
-# ---------- 替换 ----------
-echo "🔄 替换二进制..."
+# ---------- 替换（镜像到所有候选位置） ----------
+echo "🔄 替换二进制到: ${MIRROR_TARGETS[*]}"
 chmod +x "$NEW_BIN"
-if ! cp -f "$NEW_BIN" "$XUI_BIN"; then
-  echo "❌ 替换失败，尝试回滚..."
-  cp -f "$BACKUP_PATH" "$XUI_BIN"
-  exit 1
-fi
+REPLACE_OK=true
+for target in "${MIRROR_TARGETS[@]}"; do
+  # Skip non-regular files (e.g. broken symlinks to absent paths).
+  if [[ -e "$target" || -L "$target" ]]; then
+    if ! cp -f "$NEW_BIN" "$target"; then
+      echo "❌ 替换 $target 失败，尝试回滚..."
+      cp -f "$BACKUP_PATH" "$XUI_BIN"
+      REPLACE_OK=false
+      break
+    fi
+  else
+    # Brand-new install: place it where the unit will look for it.
+    mkdir -p "$(dirname "$target")"
+    cp -f "$NEW_BIN" "$target"
+  fi
+done
+[[ "$REPLACE_OK" == false ]] && exit 1
 
 # ---------- 启动 ----------
 if [[ "$SERVICE_WAS_ACTIVE" == true ]]; then
-  echo "▶️  启动 x-ui 服务..."
-  systemctl start x-ui
-elif systemctl list-unit-files | grep -q "^x-ui.service"; then
-  echo "▶️  启动 x-ui 服务 (enable 但未 active)..."
-  systemctl start x-ui
-elif command -v x-ui >/dev/null; then
-  x-ui start
+  echo "▶️  通过 $INIT_SYS 启动 x-ui..."
+  service_start || echo "⚠️  启动失败，请用 '$INIT_SYS' 的命令手动启动"
+elif [[ "$INIT_SYS" != "none" ]]; then
+  echo "▶️  通过 $INIT_SYS 启动 x-ui（之前未在跑）..."
+  service_start || echo "⚠️  启动失败，请手动启动"
 else
-  echo "⚠️  未找到启动方式，请手动启动 x-ui"
+  echo "⚠️  未找到 init 系统，请手动启动 x-ui"
 fi
 
 # ---------- 等待并验证 ----------
@@ -307,5 +399,11 @@ echo " 如已存在旧数据入站: 把倍率从默认 1 改成你想要的倍�
 echo ""
 echo " 如需回滚:"
 echo "   sudo cp $BACKUP_PATH $XUI_BIN"
-echo "   sudo systemctl restart x-ui"
+case "$INIT_SYS" in
+  systemd)  echo "   sudo systemctl restart x-ui" ;;
+  openrc)   echo "   sudo rc-service x-ui restart" ;;
+  runit)    echo "   sudo sv restart x-ui" ;;
+  sysvinit) echo "   sudo service x-ui restart" ;;
+  none)     echo "   （未检测到 init 系统，请手动重启 x-ui）" ;;
+esac
 echo ""
